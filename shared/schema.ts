@@ -1,6 +1,7 @@
-import { pgTable, text, serial, integer, boolean, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, boolean, timestamp, jsonb, primaryKey, foreignKey } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
+import { relations } from "drizzle-orm";
 
 // Users (admin users of the system)
 export const users = pgTable("users", {
@@ -99,6 +100,26 @@ export const blockchainStatus = pgTable("blockchain_status", {
 export const updateBlockchainStatusSchema = createInsertSchema(blockchainStatus).omit({
   id: true,
 });
+
+// Relations
+export const votersRelations = relations(voters, ({ many }) => ({
+  votes: many(votes),
+}));
+
+export const candidatesRelations = relations(candidates, ({ many }) => ({
+  votes: many(votes),
+}));
+
+export const votesRelations = relations(votes, ({ one }) => ({
+  voter: one(voters, {
+    fields: [votes.voterId],
+    references: [voters.voterId],
+  }),
+  candidate: one(candidates, {
+    fields: [votes.candidateId],
+    references: [candidates.id],
+  }),
+}));
 
 // Type Exports
 export type User = typeof users.$inferSelect;
