@@ -6,9 +6,11 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { queryClient } from "@/lib/queryClient";
 import { Candidate } from "@shared/schema";
-import { CheckIcon, Fingerprint, UserCheck } from "lucide-react";
+import { CheckIcon, Fingerprint, UserCheck, UserIcon } from "lucide-react";
 import { formatAddress } from "@/lib/utils";
 import BiometricSetup from "@/components/BiometricSetup";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 
 type VotingStep = "verify" | "authenticated" | "voting" | "confirmation";
 
@@ -20,24 +22,44 @@ const VotingInterface: React.FC = () => {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [nftToken, setNftToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [voters, setVoters] = useState<Array<{ id: number; voterId: string; fullName: string; hasVoted: boolean | null }>>([]);
+  const [selectedVoterId, setSelectedVoterId] = useState<string>("");
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const { toast } = useToast();
 
-  // Load candidates on component mount
+  // Load candidates and voters on component mount
   useEffect(() => {
-    const fetchCandidates = async () => {
+    const fetchData = async () => {
       try {
-        const response = await fetch("/api/candidates");
-        if (response.ok) {
-          const data = await response.json();
-          setCandidates(data);
+        // Fetch candidates
+        const candidatesResponse = await fetch("/api/candidates");
+        if (candidatesResponse.ok) {
+          const candidatesData = await candidatesResponse.json();
+          setCandidates(candidatesData);
+        }
+        
+        // Fetch voters
+        const votersResponse = await fetch("/api/voters");
+        if (votersResponse.ok) {
+          const votersData = await votersResponse.json();
+          setVoters(votersData);
+          
+          // Set default voter if available
+          if (votersData.length > 0) {
+            const availableVoter = votersData.find((v: any) => !v.hasVoted);
+            if (availableVoter) {
+              setSelectedVoterId(availableVoter.voterId);
+            } else if (votersData.length > 0) {
+              setSelectedVoterId(votersData[0].voterId);
+            }
+          }
         }
       } catch (error) {
-        console.error("Failed to fetch candidates:", error);
+        console.error("Failed to fetch data:", error);
       }
     };
 
-    fetchCandidates();
+    fetchData();
   }, []);
 
   // Timer effect for voting window
@@ -75,7 +97,14 @@ const VotingInterface: React.FC = () => {
   };
 
   const submitVote = async () => {
-    if (currentVote === null) return;
+    if (currentVote === null || !selectedVoterId) {
+      toast({
+        variant: "destructive",
+        title: "Voting Error",
+        description: "Please select both a voter ID and a candidate.",
+      });
+      return;
+    }
     
     try {
       setIsLoading(true);
@@ -83,7 +112,10 @@ const VotingInterface: React.FC = () => {
       const response = await apiRequest(
         "POST",
         "/api/votes/cast",
-        { candidateId: currentVote }
+        { 
+          candidateId: currentVote,
+          voterId: selectedVoterId
+        }
       );
       
       const data = await response.json();
@@ -100,6 +132,11 @@ const VotingInterface: React.FC = () => {
         
         // Invalidate votes query to refresh any results
         queryClient.invalidateQueries({ queryKey: ["/api/votes"] });
+        
+        // Update the local voters list to mark this voter as having voted
+        setVoters(prev => prev.map(voter => 
+          voter.voterId === selectedVoterId ? { ...voter, hasVoted: true } : voter
+        ));
       } else {
         toast({
           variant: "destructive",
@@ -145,16 +182,54 @@ const VotingInterface: React.FC = () => {
           {/* Step: Authenticated */}
           {votingStep === "authenticated" && (
             <div>
-              <Alert variant="success" className="mb-6">
+              <Alert className="mb-6">
                 <UserCheck className="h-4 w-4" />
                 <AlertTitle>Voter Authenticated</AlertTitle>
                 <AlertDescription>
-                  Identity verified using biometric data and zero-knowledge proof. You can now proceed to vote.
+                  Identity verified using biometric data and zero-knowledge proof. Please select your voter ID to proceed.
                 </AlertDescription>
               </Alert>
               
+              <div className="mb-6 space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="voterId">Select Your Voter ID</Label>
+                  <select 
+                    id="voterId"
+                    className="w-full p-2 border border-neutral-300 rounded-md"
+                    value={selectedVoterId}
+                    onChange={(e) => setSelectedVoterId(e.target.value)}
+                  >
+                    <option value="">Select a Voter ID</option>
+                    {voters.map(voter => (
+                      <option 
+                        key={voter.id} 
+                        value={voter.voterId}
+                        disabled={voter.hasVoted}
+                      >
+                        {voter.voterId} - {voter.fullName} {voter.hasVoted ? "(Already Voted)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                
+                <div className="pt-2">
+                  {selectedVoterId ? (
+                    <div className="text-sm text-neutral-600 mb-4">
+                      You are voting as <span className="font-semibold">{selectedVoterId}</span>
+                    </div>
+                  ) : (
+                    <div className="text-sm text-red-600 mb-4">
+                      Please select a Voter ID to continue
+                    </div>
+                  )}
+                </div>
+              </div>
+              
               <div className="my-6 flex justify-center">
-                <Button onClick={startVoting}>
+                <Button 
+                  onClick={startVoting}
+                  disabled={!selectedVoterId}
+                >
                   Proceed to Voting
                 </Button>
               </div>

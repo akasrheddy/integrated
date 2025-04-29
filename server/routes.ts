@@ -219,6 +219,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const voteSchema = z.object({
         candidateId: z.number().int().positive(),
+        voterId: z.string().min(1)
       });
       
       const result = voteSchema.safeParse(req.body);
@@ -231,25 +232,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
       
-      // For demonstration purposes, we'll try to find a voter who hasn't voted yet
-      // In a real app, this would come from the authenticated session
-      let voter = null;
-      
-      // Get all voters and find one who hasn't voted yet
-      const voters = await storage.getAllVoters();
-      const availableVoter = voters.find(v => !v.hasVoted);
-      
-      if (availableVoter) {
-        voter = availableVoter;
-      } else {
-        // If all voters have voted, use the first one
-        voter = voters[0];
-      }
+      // Get the voter with the provided ID
+      const voter = await storage.getVoterByVoterId(result.data.voterId);
       
       if (!voter) {
         return res.status(404).json({
           success: false,
-          message: "Voter not found"
+          message: "Voter not found with the provided ID"
+        });
+      }
+      
+      // Check if voter has already voted (but allow in development for testing)
+      if (process.env.NODE_ENV !== 'development' && voter.hasVoted) {
+        return res.status(400).json({
+          success: false,
+          message: "This voter has already cast a vote"
         });
       }
       
