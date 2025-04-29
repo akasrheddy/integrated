@@ -492,6 +492,41 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Toggle simulation mode for Arduino
+  app.post("/api/arduino/toggle-simulation", async (req: Request, res: Response) => {
+    try {
+      const useSimulation = req.body.useSimulation === true;
+      
+      // If currently connected, disconnect first
+      if (arduinoController.getStatus().connected) {
+        await arduinoController.disconnect();
+      }
+      
+      // Update simulation mode
+      arduinoController.setSimulationMode(useSimulation);
+      
+      // Update the hardware status
+      await storage.updateHardwareStatus({
+        fingerprintScannerConnected: false,
+        arduinoStatus: "disconnected",
+        lastSync: new Date()
+      });
+      
+      res.json({
+        success: true,
+        simulationMode: useSimulation,
+        message: useSimulation 
+          ? "Simulation mode enabled. Fingerprint operations will be simulated." 
+          : "Simulation mode disabled. Real hardware will be used."
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        message: error instanceof Error ? error.message : "Failed to toggle simulation mode"
+      });
+    }
+  });
+
   // --- Facial Recognition ---
   
   // Enroll facial data
