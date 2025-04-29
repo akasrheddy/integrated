@@ -124,18 +124,18 @@ const Sidebar: React.FC<SidebarProps> = ({ open, setOpen }) => {
       </div>
       <nav className="mt-8 px-2">
         {navigation.map((item) => (
-          <Link key={item.name} href={item.href}>
-            <a
-              className={cn(
-                "group flex items-center px-2 py-2 text-base font-medium rounded-md mb-1",
-                location === item.href
-                  ? "bg-primary text-white"
-                  : "text-neutral-100 hover:bg-primary hover:text-white"
-              )}
-            >
-              {item.icon}
-              {item.name}
-            </a>
+          <Link 
+            key={item.name} 
+            href={item.href}
+            className={cn(
+              "group flex items-center px-2 py-2 text-base font-medium rounded-md mb-1",
+              location === item.href
+                ? "bg-primary text-white"
+                : "text-neutral-100 hover:bg-primary hover:text-white"
+            )}
+          >
+            {item.icon}
+            {item.name}
           </Link>
         ))}
         
