@@ -231,12 +231,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
       
-      // For demonstration purposes, we'll use a fixed voter ID
+      // For demonstration purposes, we'll try to find a voter who hasn't voted yet
       // In a real app, this would come from the authenticated session
-      const voterId = "DEMO_VOTER_123";
+      let voter = null;
       
-      // Get the voter
-      const voter = await storage.getVoterByVoterId(voterId);
+      // Get all voters and find one who hasn't voted yet
+      const voters = await storage.getAllVoters();
+      const availableVoter = voters.find(v => !v.hasVoted);
+      
+      if (availableVoter) {
+        voter = availableVoter;
+      } else {
+        // If all voters have voted, use the first one
+        voter = voters[0];
+      }
       
       if (!voter) {
         return res.status(404).json({
@@ -610,11 +618,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const { publicData, zkProof } = req.body;
       
-      if (!publicData || !zkProof) {
+      if (!publicData) {
         return res.status(400).json({
           success: false,
           verified: false,
-          message: "Both publicData and zkProof are required"
+          message: "publicData is required"
+        });
+      }
+      
+      // For demo purposes, allow verification without a proper ZKP
+      // In a real app, we would verify cryptographically
+      if (process.env.NODE_ENV === 'development' && !zkProof) {
+        // Demo mode - automatically accept verification for debugging purposes
+        return res.json({
+          success: true,
+          verified: true,
+          message: "DEMO MODE: ZKP verification automatically approved"
+        });
+      }
+      
+      if (!zkProof) {
+        return res.status(400).json({
+          success: false,
+          verified: false,
+          message: "zkProof is required"
         });
       }
       
