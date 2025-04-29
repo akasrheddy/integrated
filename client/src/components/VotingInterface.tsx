@@ -22,6 +22,7 @@ const VotingInterface: React.FC = () => {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [nftToken, setNftToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isConnectingBlockchain, setIsConnectingBlockchain] = useState(false);
   const [voters, setVoters] = useState<Array<{ id: number; voterId: string; fullName: string; hasVoted: boolean | null }>>([]);
   const [selectedVoterId, setSelectedVoterId] = useState<string>("");
   const timerRef = useRef<NodeJS.Timeout | null>(null);
@@ -84,6 +85,42 @@ const VotingInterface: React.FC = () => {
 
   const handleBiometricComplete = () => {
     setVotingStep("authenticated");
+  };
+
+  const connectBlockchain = async () => {
+    try {
+      setIsConnectingBlockchain(true);
+      
+      const response = await apiRequest(
+        "POST",
+        "/api/blockchain/connect",
+        {}
+      );
+      
+      const data = await response.json();
+      
+      if (data.connected) {
+        toast({
+          title: "Blockchain Connected",
+          description: `${data.message}`,
+        });
+        startVoting();
+      } else {
+        toast({
+          variant: "destructive",
+          title: "Connection Failed",
+          description: data.message || "Failed to connect to blockchain. Please try again.",
+        });
+      }
+    } catch (error) {
+      toast({
+        variant: "destructive",
+        title: "Connection Error",
+        description: "An error occurred while connecting to the blockchain. Please try again.",
+      });
+    } finally {
+      setIsConnectingBlockchain(false);
+    }
   };
 
   const startVoting = () => {
@@ -262,10 +299,17 @@ const VotingInterface: React.FC = () => {
               
               <div className="my-6 flex justify-center">
                 <Button 
-                  onClick={startVoting}
-                  disabled={!selectedVoterId}
+                  onClick={connectBlockchain}
+                  disabled={!selectedVoterId || isConnectingBlockchain}
                 >
-                  Proceed to Voting
+                  {isConnectingBlockchain ? (
+                    <>
+                      <span className="animate-pulse mr-2">●</span>
+                      Connecting to Blockchain...
+                    </>
+                  ) : (
+                    "Connect and Proceed to Voting"
+                  )}
                 </Button>
               </div>
             </div>
@@ -315,7 +359,14 @@ const VotingInterface: React.FC = () => {
                   onClick={submitVote} 
                   disabled={currentVote === null || isLoading}
                 >
-                  Submit Vote
+                  {isLoading ? (
+                    <>
+                      <span className="animate-pulse mr-2">●</span>
+                      Recording Vote...
+                    </>
+                  ) : (
+                    "Submit Vote"
+                  )}
                 </Button>
               </div>
             </div>

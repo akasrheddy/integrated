@@ -250,6 +250,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
       
+      // Check if blockchain is connected, if not, try to connect
+      const blockchainStatus = await blockchainController.getStatus();
+      if (!blockchainStatus.connected) {
+        const connectResult = await blockchainController.connect();
+        if (!connectResult.connected) {
+          return res.status(500).json({
+            success: false,
+            message: "Failed to connect to blockchain network. Please try again."
+          });
+        }
+      }
+      
       // Generate a blind signature
       const blindSignatureResult = await blockchainController.generateBlindSignature({
         voterId: voter.voterId,
