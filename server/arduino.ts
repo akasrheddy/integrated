@@ -10,13 +10,16 @@ export interface ArduinoConfig {
   timeout: number;
 }
 
-// Default configuration
+// Default configuration - reads from environment variables if available
 export const arduinoConfig: ArduinoConfig = {
   // Check environment variable - Set ARDUINO_SIMULATION_MODE=false to use real hardware
   useSimulation: process.env.ARDUINO_SIMULATION_MODE !== 'false',
-  port: "/dev/ttyUSB0", // Linux default - change to COM port for Windows
-  baudRate: 9600, // Match Arduino's Serial.begin(9600)
-  timeout: 5000
+  // Override default port with environment variable if provided
+  port: process.env.ARDUINO_PORT || (process.platform === "win32" ? "COM3" : "/dev/ttyUSB0"),
+  // Override default baud rate with environment variable if provided
+  baudRate: process.env.ARDUINO_BAUD_RATE ? parseInt(process.env.ARDUINO_BAUD_RATE) : 9600,
+  // Override default timeout with environment variable if provided
+  timeout: process.env.ARDUINO_TIMEOUT ? parseInt(process.env.ARDUINO_TIMEOUT) : 5000
 };
 
 /**

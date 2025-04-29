@@ -372,11 +372,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Connect to Arduino
   app.post("/api/arduino/connect", async (req: Request, res: Response) => {
     try {
-      const result = await arduinoController.connect(
-        req.body.port,
-        req.body.baudRate,
-        req.body.timeout
-      );
+      // Update settings if provided in request body
+      if (req.body.port || req.body.baudRate || req.body.timeout) {
+        arduinoController.updateSettings({
+          port: req.body.port,
+          baudRate: req.body.baudRate,
+          timeout: req.body.timeout
+        });
+      }
+      
+      const result = await arduinoController.connect();
       
       if (result.connected) {
         await storage.updateHardwareStatus({
