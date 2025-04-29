@@ -12,10 +12,10 @@ import BiometricSetup from "@/components/BiometricSetup";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
-type VotingStep = "verify" | "authenticated" | "voting" | "confirmation";
+type VotingStep = "select-voter" | "verify" | "authenticated" | "voting" | "confirmation";
 
 const VotingInterface: React.FC = () => {
-  const [votingStep, setVotingStep] = useState<VotingStep>("verify");
+  const [votingStep, setVotingStep] = useState<VotingStep>("select-voter");
   const [votingTimer, setVotingTimer] = useState(30);
   const [currentVote, setCurrentVote] = useState<number | null>(null);
   const [isVoting, setIsVoting] = useState(false);
@@ -156,11 +156,12 @@ const VotingInterface: React.FC = () => {
   };
 
   const resetVoting = () => {
-    setVotingStep("verify");
+    setVotingStep("select-voter");
     setCurrentVote(null);
     setNftToken(null);
     setIsVoting(false);
     setVotingTimer(30);
+    setSelectedVoterId("");
   };
 
   return (
@@ -171,30 +172,22 @@ const VotingInterface: React.FC = () => {
       </CardHeader>
       <CardContent>
         <div className="max-w-3xl mx-auto">
-          {/* Step: Voter Verification */}
-          {votingStep === "verify" && (
-            <BiometricSetup 
-              mode="verification" 
-              onComplete={handleBiometricComplete} 
-            />
-          )}
-          
-          {/* Step: Authenticated */}
-          {votingStep === "authenticated" && (
+          {/* Step: Select Voter */}
+          {votingStep === "select-voter" && (
             <div>
               <Alert className="mb-6">
-                <UserCheck className="h-4 w-4" />
-                <AlertTitle>Voter Authenticated</AlertTitle>
+                <UserIcon className="h-4 w-4" />
+                <AlertTitle>Voter Selection</AlertTitle>
                 <AlertDescription>
-                  Identity verified using biometric data and zero-knowledge proof. Please select your voter ID to proceed.
+                  Please select your Voter ID to begin the authentication process.
                 </AlertDescription>
               </Alert>
               
               <div className="mb-6 space-y-4">
                 <div className="space-y-2">
-                  <Label htmlFor="voterId">Select Your Voter ID</Label>
+                  <Label htmlFor="voterIdSelect">Select Your Voter ID</Label>
                   <select 
-                    id="voterId"
+                    id="voterIdSelect"
                     className="w-full p-2 border border-neutral-300 rounded-md"
                     value={selectedVoterId}
                     onChange={(e) => setSelectedVoterId(e.target.value)}
@@ -215,13 +208,55 @@ const VotingInterface: React.FC = () => {
                 <div className="pt-2">
                   {selectedVoterId ? (
                     <div className="text-sm text-neutral-600 mb-4">
-                      You are voting as <span className="font-semibold">{selectedVoterId}</span>
+                      You selected: <span className="font-semibold">{selectedVoterId}</span>
                     </div>
                   ) : (
                     <div className="text-sm text-red-600 mb-4">
                       Please select a Voter ID to continue
                     </div>
                   )}
+                </div>
+              </div>
+              
+              <div className="my-6 flex justify-center">
+                <Button 
+                  onClick={() => setVotingStep("verify")}
+                  disabled={!selectedVoterId}
+                >
+                  Proceed to Biometric Verification
+                </Button>
+              </div>
+            </div>
+          )}
+          
+          {/* Step: Voter Verification */}
+          {votingStep === "verify" && (
+            <BiometricSetup 
+              mode="verification" 
+              onComplete={handleBiometricComplete} 
+            />
+          )}
+          
+          {/* Step: Authenticated */}
+          {votingStep === "authenticated" && (
+            <div>
+              <Alert className="mb-6">
+                <UserCheck className="h-4 w-4" />
+                <AlertTitle>Voter Authenticated</AlertTitle>
+                <AlertDescription>
+                  Identity verified using biometric data and zero-knowledge proof.
+                </AlertDescription>
+              </Alert>
+              
+              <div className="p-4 mb-6 border border-green-200 bg-green-50 rounded-md">
+                <div className="flex items-center space-x-3">
+                  <div className="h-10 w-10 rounded-full bg-green-100 flex items-center justify-center">
+                    <Fingerprint className="h-5 w-5 text-green-600" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-medium text-green-800">Biometric Authentication Successful</h3>
+                    <p className="text-sm text-green-600">You are verified as <span className="font-semibold">{selectedVoterId}</span></p>
+                  </div>
                 </div>
               </div>
               
