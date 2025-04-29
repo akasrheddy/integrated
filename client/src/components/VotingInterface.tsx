@@ -101,7 +101,7 @@ const VotingInterface: React.FC = () => {
         clearTimeout(timerRef.current);
       }
     };
-  }, [isConfirmationMode, confirmationTimer]);
+  }, [isConfirmationMode, confirmationTimer, currentVote, selectedVoterId]);
 
   const handleBiometricComplete = () => {
     setVotingStep("authenticated");
