@@ -23,6 +23,8 @@ const VotingInterface: React.FC = () => {
   const [nftToken, setNftToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isConnectingBlockchain, setIsConnectingBlockchain] = useState(false);
+  const [confirmationTimer, setConfirmationTimer] = useState(0);
+  const [isConfirmationMode, setIsConfirmationMode] = useState(false);
   const [voters, setVoters] = useState<Array<{ id: number; voterId: string; fullName: string; hasVoted: boolean | null }>>([]);
   const [selectedVoterId, setSelectedVoterId] = useState<string>("");
   const timerRef = useRef<NodeJS.Timeout | null>(null);
@@ -72,7 +74,7 @@ const VotingInterface: React.FC = () => {
     } else if (votingTimer === 0 && isVoting) {
       // Time's up, submit the vote if one is selected
       if (currentVote !== null) {
-        submitVote();
+        submitFinalVote();
       }
     }
 
@@ -81,7 +83,25 @@ const VotingInterface: React.FC = () => {
         clearTimeout(timerRef.current);
       }
     };
-  }, [isVoting, votingTimer]);
+  }, [isVoting, votingTimer, currentVote]);
+  
+  // Timer effect for confirmation window after submit clicked
+  useEffect(() => {
+    if (isConfirmationMode && confirmationTimer > 0) {
+      timerRef.current = setTimeout(() => {
+        setConfirmationTimer(prev => prev - 1);
+      }, 1000);
+    } else if (confirmationTimer === 0 && isConfirmationMode) {
+      // Time's up, confirm the vote
+      finalizeFinalVote();
+    }
+
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+      }
+    };
+  }, [isConfirmationMode, confirmationTimer]);
 
   const handleBiometricComplete = () => {
     setVotingStep("authenticated");
@@ -133,7 +153,46 @@ const VotingInterface: React.FC = () => {
     setCurrentVote(candidateId);
   };
 
-  const submitVote = async () => {
+  const submitVote = () => {
+    if (currentVote === null || !selectedVoterId) {
+      toast({
+        variant: "destructive",
+        title: "Voting Error",
+        description: "Please select both a voter ID and a candidate.",
+      });
+      return;
+    }
+    
+    // Start the confirmation timer
+    setConfirmationTimer(15);
+    setIsConfirmationMode(true);
+    
+    toast({
+      title: "Confirm Your Vote",
+      description: "You have 15 seconds to change your vote before final submission.",
+    });
+  };
+  
+  const cancelVote = () => {
+    // Cancel the confirmation timer
+    setIsConfirmationMode(false);
+    setConfirmationTimer(0);
+    
+    toast({
+      title: "Vote Cancelled",
+      description: "You can continue selecting a candidate.",
+    });
+  };
+  
+  const submitFinalVote = () => {
+    if (isConfirmationMode) {
+      finalizeFinalVote();
+    } else {
+      submitVote();
+    }
+  };
+  
+  const finalizeFinalVote = async () => {
     if (currentVote === null || !selectedVoterId) {
       toast({
         variant: "destructive",
@@ -145,6 +204,7 @@ const VotingInterface: React.FC = () => {
     
     try {
       setIsLoading(true);
+      setIsConfirmationMode(false);
       
       const response = await apiRequest(
         "POST",
@@ -318,10 +378,17 @@ const VotingInterface: React.FC = () => {
           {/* Step: Voting */}
           {votingStep === "voting" && (
             <div>
-              {isVoting && (
+              {isVoting && !isConfirmationMode && (
                 <div className="mb-4 bg-primary bg-opacity-10 rounded-md p-4 text-center">
                   <div className="text-lg font-medium text-primary">Time Remaining: {votingTimer} seconds</div>
                   <p className="text-sm text-neutral-600">You can change your vote within this time window. Only the final vote will be recorded.</p>
+                </div>
+              )}
+              
+              {isConfirmationMode && (
+                <div className="mb-4 bg-red-500 bg-opacity-10 rounded-md p-4 text-center border border-red-500">
+                  <div className="text-lg font-medium text-red-600">Confirmation Time: {confirmationTimer} seconds</div>
+                  <p className="text-sm text-red-600 font-semibold">You can still change your vote before final submission!</p>
                 </div>
               )}
               
@@ -354,16 +421,29 @@ const VotingInterface: React.FC = () => {
                 ))}
               </div>
               
-              <div className="mt-6 flex justify-end">
+              <div className="mt-6 flex justify-end space-x-3">
+                {isConfirmationMode && (
+                  <Button 
+                    variant="outline" 
+                    onClick={cancelVote}
+                    disabled={isLoading}
+                  >
+                    Cancel
+                  </Button>
+                )}
+                
                 <Button 
-                  onClick={submitVote} 
+                  onClick={isConfirmationMode ? finalizeFinalVote : submitVote} 
                   disabled={currentVote === null || isLoading}
+                  variant={isConfirmationMode ? "destructive" : "default"}
                 >
                   {isLoading ? (
                     <>
                       <span className="animate-pulse mr-2">●</span>
                       Recording Vote...
                     </>
+                  ) : isConfirmationMode ? (
+                    "Confirm Final Vote"
                   ) : (
                     "Submit Vote"
                   )}
