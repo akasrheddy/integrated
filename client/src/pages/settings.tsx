@@ -13,6 +13,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { AlertCircle, Save } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import ArduinoSimulationToggle from "@/components/ArduinoSimulationToggle";
 
 const arduinoSettingsSchema = z.object({
   serialPort: z.string().min(1, "Serial port is required"),

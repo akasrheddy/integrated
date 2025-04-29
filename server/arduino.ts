@@ -12,7 +12,8 @@ export interface ArduinoConfig {
 
 // Default configuration
 export const arduinoConfig: ArduinoConfig = {
-  useSimulation: true, // Set to false to use real hardware
+  // Check environment variable - Set ARDUINO_SIMULATION_MODE=false to use real hardware
+  useSimulation: process.env.ARDUINO_SIMULATION_MODE !== 'false',
   port: "/dev/ttyUSB0", // Linux default - change to COM port for Windows
   baudRate: 9600, // Match Arduino's Serial.begin(9600)
   timeout: 5000
