@@ -204,9 +204,9 @@ const VotingInterface: React.FC = () => {
                       <option 
                         key={voter.id} 
                         value={voter.voterId}
-                        disabled={voter.hasVoted}
+                        disabled={voter.hasVoted === true}
                       >
-                        {voter.voterId} - {voter.fullName} {voter.hasVoted ? "(Already Voted)" : ""}
+                        {voter.voterId} - {voter.fullName} {voter.hasVoted === true ? "(Already Voted)" : ""}
                       </option>
                     ))}
                   </select>
