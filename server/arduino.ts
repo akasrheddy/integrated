@@ -1,212 +1,194 @@
-// Arduino and R307 Fingerprint Sensor integration
-import { SerialPort, ReadlineParser } from "serialport";
+import { SerialPort } from "serialport";
 import { createSaltedHash } from "../client/src/lib/utils";
+import { storage } from "./storage"; // Using DatabaseStorage
+import dotenv from "dotenv";
 
-// Global configuration for Arduino mode
+dotenv.config();
+
+// Global configuration
 export interface ArduinoConfig {
-  useSimulation: boolean;
+  useRealArduino: boolean;
+  enableSimulation: boolean;
   port: string;
   baudRate: number;
   timeout: number;
 }
 
-// Default configuration - reads from environment variables if available
 export const arduinoConfig: ArduinoConfig = {
-  // Check environment variable - Set ARDUINO_SIMULATION_MODE=false to use real hardware
-  useSimulation: process.env.ARDUINO_SIMULATION_MODE !== 'false',
-  // Override default port with environment variable if provided
-  port: process.env.ARDUINO_PORT || (process.platform === "win32" ? "COM3" : "/dev/ttyUSB0"),
-  // Override default baud rate with environment variable if provided
-  baudRate: process.env.ARDUINO_BAUD_RATE ? parseInt(process.env.ARDUINO_BAUD_RATE) : 9600,
-  // Override default timeout with environment variable if provided
-  timeout: process.env.ARDUINO_TIMEOUT ? parseInt(process.env.ARDUINO_TIMEOUT) : 5000
+  useRealArduino: process.env.USE_REAL_ARDUINO === "true",
+  enableSimulation: process.env.ENABLE_SIMULATION === "true",
+  port: process.env.ARDUINO_PORT || "COM11",
+  baudRate: process.env.ARDUINO_BAUDRATE ? parseInt(process.env.ARDUINO_BAUDRATE) : 9600,
+  timeout: process.env.ARDUINO_TIMEOUT ? parseInt(process.env.ARDUINO_TIMEOUT) : 20000, // Increased timeout
 };
 
 /**
  * Controller for communicating with Arduino R307 fingerprint sensor
- * This implementation matches the Arduino code provided that uses Adafruit_Fingerprint library
+ * Matches the provided Arduino sketch using Adafruit_Fingerprint library
  */
 class ArduinoController {
   private serialPort: SerialPort | null = null;
-  private parser: ReadlineParser | null = null;
   private connected: boolean = false;
-  private firmwareVersion: string = "2.1.4";
-  
-  // Connection settings
-  private port: string = "/dev/ttyUSB0"; // Linux default
-  // For Windows users: Update this to "COM3" or similar
-  private baudRate: number = 9600; // Match Arduino's Serial.begin(9600)
-  private timeout: number = 5000;
-  
-  // Sensor status
-  private sensorStatus: "disconnected" | "ready" | "busy" | "error" = "disconnected";
-  private lastError: string | null = null;
-  private lastActive: Date | null = null;
-  private responseQueue: Array<(response: string) => void> = [];
-  
-  // For simulation mode
-  private useSimulation: boolean = true;
-  private fingerprintTemplates: Map<number, { 
-    template: string, 
-    hash: string 
-  }> = new Map();
-  private nextTemplateId: number = 1;
+  private sensorConnected: boolean = false;
+  private sensorMessage: string = "Not initialized";
+  private responseHandler: ((response: string) => void) | null = null;
+  private responseBuffer: string = ""; // Buffer to collect partial responses
+  private port: string;
+  private baudRate: number;
+  private timeout: number;
+  private useRealArduino: boolean;
+  private enableSimulation: boolean;
+  private fingerprintIdMap: Map<number, number> = new Map(); // Map user IDs to fingerprint template IDs
 
   constructor(port?: string, baudRate?: number, timeout?: number) {
-    // Load initial configuration from global settings
-    this.useSimulation = arduinoConfig.useSimulation;
+    this.useRealArduino = arduinoConfig.useRealArduino;
+    this.enableSimulation = arduinoConfig.enableSimulation;
     this.port = port || arduinoConfig.port;
     this.baudRate = baudRate || arduinoConfig.baudRate;
     this.timeout = timeout || arduinoConfig.timeout;
   }
-  
-  /**
-   * Set whether to use simulation mode or real hardware
-   */
-  setSimulationMode(useSimulation: boolean): void {
-    // If changing modes and currently connected, disconnect first
-    if (this.connected && this.useSimulation !== useSimulation) {
-      this.disconnect().then(() => {
-        this.useSimulation = useSimulation;
-        // Update global config
-        arduinoConfig.useSimulation = useSimulation;
-      });
-    } else {
-      this.useSimulation = useSimulation;
-      // Update global config
-      arduinoConfig.useSimulation = useSimulation;
-    }
-  }
 
   /**
-   * Connect to the Arduino via serial port
+   * Connect to the Arduino
    */
-  async connect(): Promise<{ connected: boolean; message: string }> {
+  async connect(maxRetries: number = 3, retryDelay: number = 2000): Promise<{ connected: boolean; message: string }> {
     if (this.connected) {
-      return { 
-        connected: true, 
-        message: this.useSimulation 
-          ? "Already connected to simulator" 
-          : `Already connected to Arduino on ${this.port}` 
+      return {
+        connected: true,
+        message: this.enableSimulation ? "Already connected to simulator" : `Already connected to Arduino on ${this.port}`,
       };
     }
 
-    // If using simulation mode, we'll simulate the connection
-    if (this.useSimulation) {
-      await new Promise(resolve => setTimeout(resolve, 500)); // Simulate connection delay
-      
+    if (this.enableSimulation) {
       this.connected = true;
-      this.sensorStatus = "ready";
-      this.lastActive = new Date();
-      
-      console.log("Using fingerprint simulator mode");
-      
-      return { 
-        connected: true, 
-        message: "Connected to fingerprint simulator (SIMULATION MODE)" 
-      };
+      this.sensorConnected = true;
+      this.sensorMessage = "Simulated sensor connected";
+      await storage.updateHardwareStatus({ arduinoStatus: "online", fingerprintScannerConnected: true });
+      return { connected: true, message: "Connected to fingerprint simulator (SIMULATION MODE)" };
     }
 
-    // Real hardware mode
-    try {
-      // Create a connection to the serial port
-      this.serialPort = new SerialPort({
-        path: this.port,
-        baudRate: this.baudRate,
-        autoOpen: false
-      });
+    if (!this.useRealArduino) {
+      this.connected = true;
+      this.sensorConnected = true;
+      this.sensorMessage = "Simulated sensor connected (hardware mode disabled)";
+      await storage.updateHardwareStatus({ arduinoStatus: "online", fingerprintScannerConnected: true });
+      return { connected: true, message: "Connected to fingerprint simulator (hardware mode disabled)" };
+    }
 
-      // Create a parser to read line-by-line
-      this.parser = this.serialPort.pipe(new ReadlineParser({ delimiter: '\n' }));
-      
-      // Setup response handler
-      this.parser.on('data', (data: string) => {
-        const response = data.toString().trim();
-        console.log(`Arduino response: ${response}`);
-        
-        // Process response
-        if (this.responseQueue.length > 0) {
-          const handler = this.responseQueue.shift();
-          if (handler) {
-            handler(response);
-          }
-        }
-        
-        // Update status based on responses
-        if (response.startsWith('SENSOR_STATUS:')) {
-          const status = response.substring('SENSOR_STATUS:'.length);
-          if (status === 'CONNECTED') {
-            this.sensorStatus = 'ready';
-          } else {
-            this.sensorStatus = 'error';
-          }
-        } else if (response.startsWith('ERROR:')) {
-          this.lastError = response.substring('ERROR:'.length);
-          this.sensorStatus = 'error';
-        }
-      });
+    let retries = 0;
+    while (retries < maxRetries) {
+      try {
+        console.log(`Attempting to connect to Arduino on ${this.port} (attempt ${retries + 1}/${maxRetries})...`);
+        const ports = await SerialPort.list();
+        console.log("Available ports:", ports);
 
-      // Open the connection
-      return new Promise((resolve, reject) => {
-        if (!this.serialPort) {
-          reject(new Error('Serial port not initialized'));
-          return;
-        }
-
-        this.serialPort.open((err) => {
-          if (err) {
-            this.connected = false;
-            this.sensorStatus = "error";
-            this.lastError = err.message;
-            resolve({ 
-              connected: false, 
-              message: `Failed to connect: ${err.message}` 
-            });
-            return;
-          }
-
-          // Check sensor status
-          this.sendCommand('CHECK_SENSOR')
-            .then((response) => {
-              if (response.startsWith('SENSOR_STATUS:CONNECTED')) {
-                this.connected = true;
-                this.sensorStatus = "ready";
-                this.lastActive = new Date();
-                resolve({ 
-                  connected: true, 
-                  message: `Connected to Arduino on ${this.port} at ${this.baudRate} baud` 
-                });
-              } else {
-                this.connected = false;
-                this.sensorStatus = "error";
-                this.lastError = "Fingerprint sensor not connected";
-                resolve({ 
-                  connected: false, 
-                  message: `Failed to connect: Fingerprint sensor not detected` 
-                });
-              }
-            })
-            .catch((error) => {
-              this.connected = false;
-              this.sensorStatus = "error";
-              this.lastError = error.message;
-              resolve({ 
-                connected: false, 
-                message: `Failed to connect: ${error.message}` 
-              });
-            });
+        this.serialPort = new SerialPort({
+          path: this.port,
+          baudRate: this.baudRate,
         });
-      });
-    } catch (error) {
-      this.connected = false;
-      this.sensorStatus = "error";
-      this.lastError = error instanceof Error ? error.message : "Unknown error";
-      
-      return { 
-        connected: false, 
-        message: `Failed to connect: ${this.lastError}` 
-      };
+
+        this.serialPort.on("open", async () => {
+          console.log("Arduino connected on port:", this.port);
+          this.connected = true;
+          await storage.updateHardwareStatus({ 
+            arduinoStatus: "online", 
+            fingerprintScannerConnected: this.sensorConnected,
+            lastActiveFingerprint: new Date()
+          });
+          this.sendCommand("CHECK_SENSOR");
+        });
+
+        this.serialPort.on("data", (data) => {
+          const incomingData = data.toString();
+          this.responseBuffer += incomingData; // Add incoming data to buffer
+          
+          // Check for complete messages in the buffer
+          let lines = this.responseBuffer.split('\n');
+          // Process all complete lines except the last one (which might be incomplete)
+          for (let i = 0; i < lines.length - 1; i++) {
+            const message = lines[i].trim();
+            if (message) {
+              console.log("Arduino response:", message);
+              this.handleResponse(message);
+            }
+          }
+          // Keep the last (potentially incomplete) line in the buffer
+          this.responseBuffer = lines[lines.length - 1];
+        });
+
+        this.serialPort.on("error", async (error) => {
+          console.error("Arduino connection error:", error.message);
+          this.connected = false;
+          this.sensorConnected = false;
+          this.sensorMessage = `Connection error: ${error.message}`;
+          await storage.updateHardwareStatus({ 
+            arduinoStatus: "error", 
+            fingerprintScannerConnected: false 
+          });
+        });
+
+        this.serialPort.on("close", async () => {
+          console.log("Arduino connection closed");
+          this.connected = false;
+          this.sensorConnected = false;
+          this.sensorMessage = "Connection closed";
+          await storage.updateHardwareStatus({ 
+            arduinoStatus: "disconnected", 
+            fingerprintScannerConnected: false 
+          });
+        });
+
+        return await new Promise((resolve) => {
+          const timeoutId = setTimeout(() => {
+            resolve({
+              connected: false,
+              message: `Failed to connect: Connection timed out after ${this.timeout}ms`,
+            });
+          }, this.timeout);
+
+          this.serialPort!.on("open", () => {
+            clearTimeout(timeoutId);
+            resolve({
+              connected: true,
+              message: `Connected to Arduino on ${this.port} at ${this.baudRate} baud`,
+            });
+          });
+
+          this.serialPort!.on("error", (err) => {
+            clearTimeout(timeoutId);
+            resolve({
+              connected: false,
+              message: `Failed to connect: ${err.message}. Try closing other programs or running as Administrator.`,
+            });
+          });
+        });
+      } catch (error) {
+        this.connected = false;
+        this.sensorConnected = false;
+        this.sensorMessage = `Setup error: ${(error as Error).message}`;
+        await storage.updateHardwareStatus({ 
+          arduinoStatus: "error", 
+          fingerprintScannerConnected: false 
+        });
+
+        if ((error as Error).message.includes("Access denied") && retries < maxRetries - 1) {
+          retries++;
+          console.log(`Retrying connection after ${retryDelay}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
+          continue;
+        }
+
+        return {
+          connected: false,
+          message: `Failed to connect after ${retries + 1} attempts: ${(error as Error).message}. Try closing other programs or running as Administrator.`,
+        };
+      }
     }
+
+    return {
+      connected: false,
+      message: `Failed to connect after ${maxRetries} attempts: Max retries reached`,
+    };
   }
 
   /**
@@ -214,109 +196,173 @@ class ArduinoController {
    */
   async disconnect(): Promise<{ success: boolean; message: string }> {
     if (!this.connected) {
-      return { 
-        success: true, 
-        message: "Already disconnected" 
-      };
+      return { success: true, message: "Already disconnected" };
     }
 
-    // If in simulation mode, just simulate disconnection
-    if (this.useSimulation) {
-      await new Promise(resolve => setTimeout(resolve, 300)); // Simulate disconnect delay
-      
+    if (this.enableSimulation || !this.useRealArduino) {
       this.connected = false;
-      this.sensorStatus = "disconnected";
-      
-      return { 
-        success: true, 
-        message: "Disconnected from fingerprint simulator" 
-      };
+      this.sensorConnected = false;
+      this.sensorMessage = "Disconnected from simulator";
+      await storage.updateHardwareStatus({ 
+        arduinoStatus: "disconnected", 
+        fingerprintScannerConnected: false 
+      });
+      return { success: true, message: "Disconnected from fingerprint simulator" };
     }
 
-    // Handle real hardware disconnect
     if (!this.serialPort) {
       this.connected = false;
-      this.sensorStatus = "disconnected";
-      return { 
-        success: true, 
-        message: "Disconnected (serial port was not initialized)" 
-      };
+      this.sensorConnected = false;
+      this.sensorMessage = "Disconnected (serial port not initialized)";
+      await storage.updateHardwareStatus({ 
+        arduinoStatus: "disconnected", 
+        fingerprintScannerConnected: false 
+      });
+      return { success: true, message: this.sensorMessage };
     }
 
     try {
-      return new Promise((resolve) => {
-        if (!this.serialPort) {
-          resolve({ 
-            success: false, 
-            message: "Serial port not initialized" 
-          });
-          return;
-        }
-
-        this.serialPort.close((err) => {
-          if (err) {
-            this.lastError = err.message;
-            resolve({ 
-              success: false, 
-              message: `Failed to disconnect: ${err.message}` 
-            });
-            return;
-          }
-
-          this.connected = false;
-          this.sensorStatus = "disconnected";
-          this.serialPort = null;
-          this.parser = null;
-          
-          resolve({ 
-            success: true, 
-            message: "Disconnected from Arduino" 
-          });
-        });
+      this.serialPort.close();
+      this.connected = false;
+      this.sensorConnected = false;
+      this.sensorMessage = "Disconnected from Arduino";
+      await storage.updateHardwareStatus({ 
+        arduinoStatus: "disconnected", 
+        fingerprintScannerConnected: false 
       });
+      this.serialPort = null;
+      return { success: true, message: "Disconnected from Arduino" };
     } catch (error) {
-      this.lastError = error instanceof Error ? error.message : "Unknown error";
-      
-      return { 
-        success: false, 
-        message: `Failed to disconnect: ${this.lastError}` 
-      };
+      this.sensorMessage = `Failed to disconnect: ${(error as Error).message}`;
+      await storage.updateHardwareStatus({ 
+        arduinoStatus: "error", 
+        fingerprintScannerConnected: false 
+      });
+      return { success: false, message: this.sensorMessage };
     }
   }
 
   /**
-   * Send a command to Arduino and wait for response
-   * In simulation mode, it simulates Arduino responses
+   * Handle Arduino responses
+   */
+  private handleResponse(message: string): void {
+    // Handle progress messages
+    if (message.startsWith("DEBUG:") || 
+        message.includes("PLACE_FINGER") || 
+        message.includes("REMOVE_FINGER") || 
+        message.includes("PLACE_AGAIN") || 
+        message.includes("IMAGE_TAKEN") || 
+        message === ".") {
+      console.log(`Progress: ${message}`);
+      return;
+    }
+
+    // Handle sensor status messages
+    if (message.startsWith("SENSOR_STATUS:")) {
+      this.sensorConnected = message === "SENSOR_STATUS:CONNECTED";
+      this.sensorMessage = this.sensorConnected ? "Sensor connected" : "Sensor not found";
+      storage.updateHardwareStatus({ 
+        fingerprintScannerConnected: this.sensorConnected,
+        lastActiveFingerprint: new Date()
+      });
+      if (this.responseHandler && message.startsWith("SENSOR_STATUS:")) {
+        this.responseHandler(message);
+      }
+      return;
+    }
+
+    // Handle template count response
+    if (message.startsWith("TEMPLATE_COUNT:")) {
+      if (this.responseHandler) {
+        this.responseHandler(message);
+      }
+      return;
+    }
+
+    // Handle enrollment errors or success
+    if (message.startsWith("ENROLL:")) {
+      if (this.responseHandler) {
+        this.responseHandler(message);
+        if (message.includes("SUCCESS") || message.includes("ERROR")) {
+          this.responseHandler = null;
+        }
+      }
+      return;
+    }
+
+    // Handle verify responses
+    if (message.startsWith("VERIFY:")) {
+      if (this.responseHandler) {
+        this.responseHandler(message);
+        if (message.includes("MATCH") || message.includes("NO_MATCH") || message.includes("ERROR")) {
+          this.responseHandler = null;
+        }
+      }
+      return;
+    }
+
+    // Handle delete responses
+    if (message.startsWith("DELETE:")) {
+      if (this.responseHandler) {
+        this.responseHandler(message);
+        if (message.includes("SUCCESS") || message.includes("ERROR")) {
+          this.responseHandler = null;
+        }
+      }
+      return;
+    }
+
+    // Pass message to response handler if available
+    if (this.responseHandler) {
+      this.responseHandler(message);
+    } else {
+      console.log("Unhandled Arduino message:", message);
+    }
+  }
+
+  /**
+   * Send a command to the Arduino
    */
   private async sendCommand(command: string, timeout = this.timeout): Promise<string> {
-    if (!this.connected) {
+    if (this.enableSimulation) {
+      console.log(`SIMULATION MODE: Command '${command}'`);
+      return this.simulateCommand(command);
+    }
+
+    if (!this.useRealArduino) {
+      console.log(`Simulating command '${command}' (hardware mode disabled)`);
+      return this.simulateCommand(command);
+    }
+
+    if (!this.serialPort || !this.serialPort.isOpen) {
       throw new Error("Arduino is not connected");
     }
 
-    // Simulation mode
-    if (this.useSimulation) {
-      return this.simulateCommand(command, timeout);
-    }
-
-    // Real hardware mode
-    if (!this.serialPort) {
-      throw new Error("Serial port not initialized");
-    }
+    // Clear response buffer before sending a new command
+    this.responseBuffer = "";
 
     return new Promise((resolve, reject) => {
       const timeoutId = setTimeout(() => {
-        reject(new Error("Command timed out"));
+        this.responseHandler = null;
+        reject(new Error(`Command '${command}' timed out after ${timeout}ms`));
       }, timeout);
 
-      this.responseQueue.push((response) => {
-        clearTimeout(timeoutId);
-        resolve(response);
-      });
+      this.responseHandler = (response) => {
+        // Check if this is the response we're waiting for
+        if ((command === "GET_COUNT" && response.startsWith("TEMPLATE_COUNT:")) ||
+            (command === "CHECK_SENSOR" && response.startsWith("SENSOR_STATUS:")) ||
+            (command.startsWith("ENROLL:") && response.startsWith("ENROLL:") && (response.includes("SUCCESS") || response.includes("ERROR"))) ||
+            (command === "VERIFY" && response.startsWith("VERIFY:") && (response.includes("MATCH") || response.includes("NO_MATCH") || response.includes("ERROR"))) ||
+            (command.startsWith("DELETE:") && response.startsWith("DELETE:") && (response.includes("SUCCESS") || response.includes("ERROR")))) {
+          clearTimeout(timeoutId);
+          resolve(response);
+        }
+      };
 
       this.serialPort!.write(`${command}\n`, (err) => {
         if (err) {
           clearTimeout(timeoutId);
-          this.responseQueue.pop(); // Remove the queued handler
+          this.responseHandler = null;
           reject(err);
         }
       });
@@ -324,97 +370,138 @@ class ArduinoController {
   }
 
   /**
-   * Simulate Arduino responses for testing without hardware
+   * Simulate Arduino responses
    */
-  private async simulateCommand(command: string, timeout: number): Promise<string> {
-    console.log(`[Simulator] Received command: ${command}`);
-    
-    // Add random delay to simulate processing time
-    const delay = Math.floor(Math.random() * 500) + 200;
-    await new Promise(resolve => setTimeout(resolve, delay));
-    
-    if (command === 'CHECK_SENSOR') {
-      return 'SENSOR_STATUS:CONNECTED';
+  private async simulateCommand(command: string): Promise<string> {
+    if (command === "CHECK_SENSOR") {
+      return "SENSOR_STATUS:CONNECTED";
     }
-    
-    if (command === 'GET_COUNT') {
-      return `TEMPLATE_COUNT:${this.fingerprintTemplates.size}`;
+    if (command === "GET_COUNT") {
+      return "TEMPLATE_COUNT:0";
     }
-    
-    if (command.startsWith('ENROLL:')) {
-      // Simulate the enrollment process with delays
-      const enrollId = parseInt(command.split(':')[1]);
-      
-      // Simulate first finger placement
-      console.log('[Simulator] ENROLL:PLACE_FINGER');
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      console.log('[Simulator] ENROLL:IMAGE_TAKEN');
-      
-      // Simulate finger removal
-      console.log('[Simulator] ENROLL:REMOVE_FINGER');
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      // Simulate second finger placement
-      console.log('[Simulator] ENROLL:PLACE_AGAIN');
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      console.log('[Simulator] ENROLL:IMAGE_TAKEN');
-      
-      // Store template in our simulation map
-      const templateData = `fingerprint_template_${enrollId}_${Date.now()}`;
-      const templateHash = createSaltedHash(templateData);
-      this.fingerprintTemplates.set(enrollId, {
-        template: templateData,
-        hash: templateHash
-      });
-      
-      this.nextTemplateId = Math.max(this.nextTemplateId, enrollId + 1);
-      
-      return `ENROLL:SUCCESS:${enrollId}`;
+    if (command.startsWith("ENROLL:")) {
+      const id = parseInt(command.split(":")[1]);
+      return `ENROLL:SUCCESS:${id}`;
     }
-    
-    if (command === 'VERIFY') {
-      // If we have no templates, always return no match
-      if (this.fingerprintTemplates.size === 0) {
-        console.log('[Simulator] VERIFY:PLACE_FINGER');
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        console.log('[Simulator] VERIFY:IMAGE_TAKEN');
-        return 'VERIFY:NO_MATCH';
-      }
-      
-      // Simulate fingerprint scan
-      console.log('[Simulator] VERIFY:PLACE_FINGER');
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      console.log('[Simulator] VERIFY:IMAGE_TAKEN');
-      
-      // Get a random template for simulation
-      const templateIds = Array.from(this.fingerprintTemplates.keys());
-      const randomId = templateIds[Math.floor(Math.random() * templateIds.length)];
-      
-      // 80% chance of success in simulation
-      const success = Math.random() < 0.8;
-      
-      return success ? `VERIFY:MATCH:${randomId}` : 'VERIFY:NO_MATCH';
+    if (command === "VERIFY") {
+      return "VERIFY:NO_MATCH";
     }
-    
-    if (command.startsWith('DELETE:')) {
-      const deleteId = parseInt(command.split(':')[1]);
-      
-      if (this.fingerprintTemplates.has(deleteId)) {
-        this.fingerprintTemplates.delete(deleteId);
-        return `DELETE:SUCCESS:${deleteId}`;
-      } else {
-        return 'DELETE:ERROR';
-      }
+    if (command.startsWith("DELETE:")) {
+      return `DELETE:SUCCESS:${command.split(":")[1]}`;
     }
-    
-    // Default unknown command response
-    return 'ERROR:UNKNOWN_COMMAND';
+    return "ERROR:UNKNOWN_COMMAND";
   }
 
   /**
-   * Enroll a new fingerprint
+   * Get Arduino status
    */
-  async enrollFingerprint(): Promise<{ 
+  async getStatus(): Promise<{
+    isConnected: boolean;
+    message: string;
+    isSensorConnected: boolean;
+    sensorMessage: string;
+  }> {
+    if (this.enableSimulation) {
+      return {
+        isConnected: true,
+        message: "SIMULATION MODE - no hardware required",
+        isSensorConnected: true,
+        sensorMessage: "SIMULATION MODE ACTIVE - place finger on the sensor graphic",
+      };
+    }
+
+    if (this.useRealArduino) {
+      if (this.serialPort && this.serialPort.isOpen) {
+        return {
+          isConnected: true,
+          message: `R307 connected on port ${this.port}`,
+          isSensorConnected: this.sensorConnected,
+          sensorMessage: this.sensorConnected
+            ? "R307 fingerprint sensor READY - place finger on sensor"
+            : "R307 sensor not detected - check wiring",
+        };
+      } else {
+        return {
+          isConnected: false,
+          message: `Unable to connect to Arduino on port ${this.port}`,
+          isSensorConnected: false,
+          sensorMessage: "Fingerprint sensor unavailable - check device connection",
+        };
+      }
+    }
+
+    return {
+      isConnected: true,
+      message: "SIMULATION MODE - hardware mode disabled",
+      isSensorConnected: true,
+      sensorMessage: "SIMULATION MODE ACTIVE - place finger on the sensor graphic",
+    };
+  }
+
+  /**
+   * Get the next available fingerprint ID
+   */
+  async getNextAvailableFingerprintId(): Promise<number> {
+    try {
+      if (!this.connected) {
+        throw new Error("Arduino is not connected");
+      }
+
+      if (this.enableSimulation || !this.useRealArduino) {
+        // In simulation mode, just return ID 1
+        return 1;
+      }
+
+      // Get template count from Arduino
+      const response = await this.sendCommand("GET_COUNT");
+      if (response.startsWith("TEMPLATE_COUNT:")) {
+        const countStr = response.split(":")[1].trim();
+        const count = parseInt(countStr);
+        
+        if (isNaN(count)) {
+          console.error(`Invalid template count: ${countStr}`);
+          return 1;
+        }
+        
+        console.log(`Template count: ${count}`);
+        
+        // If no templates, start from 1
+        if (count === 0) {
+          return 1;
+        }
+        
+        // Find the next available ID (simple implementation - more sophisticated logic might be needed)
+        // For simplicity, we'll use count + 1, ensuring it's within range (1-127)
+        const nextId = Math.min(count + 1, 127);
+        return nextId;
+      } else {
+        throw new Error(`Unexpected response: ${response}`);
+      }
+    } catch (error) {
+      console.error("Error getting next fingerprint ID:", error);
+      // Default to ID 1 if we can't determine the next available ID
+      return 1;
+    }
+  }
+
+  /**
+   * Register a fingerprint ID for a user
+   */
+  async registerFingerprint(userId: number, fingerprintId: number): Promise<void> {
+    this.fingerprintIdMap.set(userId, fingerprintId);
+  }
+
+  /**
+   * Get the fingerprint ID for a user
+   */
+  async getFingerprintByUserId(userId: number): Promise<number | null> {
+    return this.fingerprintIdMap.get(userId) || null;
+  }
+
+  /**
+   * Enroll a fingerprint
+   */
+  async enrollFingerprint(userId: number): Promise<{
     success: boolean;
     fingerprintData?: string;
     fingerprintHash?: string;
@@ -422,81 +509,95 @@ class ArduinoController {
     message: string;
   }> {
     if (!this.connected) {
-      return { 
-        success: false, 
-        message: "Arduino is not connected" 
-      };
+      return { success: false, message: "Arduino is not connected" };
     }
 
     try {
-      this.sensorStatus = "busy";
+      // For simulation mode or hardware disabled, use simplified enrollment
+      if (this.enableSimulation || !this.useRealArduino) {
+        const templateId = 1; // Use fixed ID for simulation
+        const fingerprintData = `fingerprint_template_${templateId}_${Date.now()}`;
+        const fingerprintHash = createSaltedHash(fingerprintData);
+        await this.registerFingerprint(userId, templateId);
+
+        return {
+          success: true,
+          fingerprintData,
+          fingerprintHash,
+          templateId,
+          message: "Fingerprint enrolled successfully (simulation)",
+        };
+      }
+
+      // Real hardware enrollment
+      const templateId = await this.getNextAvailableFingerprintId();
+      console.log(`Enrolling fingerprint with template ID: ${templateId}`);
       
-      // Find the next available ID
-      const templateId = await this.getNextAvailableId();
-      
-      // Start enrollment process
-      const enrollResponse = await this.sendCommand(`ENROLL:${templateId}`, 60000);
-      
-      // Process enrollment stages - progress messages will be handled by the responseQueue
-      if (enrollResponse.startsWith('ENROLL:SUCCESS:')) {
-        const id = parseInt(enrollResponse.substring('ENROLL:SUCCESS:'.length));
-        
-        // Generate a hash from the ID
+      const response = await this.sendCommand(`ENROLL:${templateId}`, 60000);
+      console.log(`Enrollment response: ${response}`);
+
+      if (response.startsWith("ENROLL:SUCCESS:")) {
+        const id = parseInt(response.split(":")[2]);
         const fingerprintData = `fingerprint_template_${id}_${Date.now()}`;
         const fingerprintHash = createSaltedHash(fingerprintData);
-        
-        this.sensorStatus = "ready";
-        this.lastActive = new Date();
-        
+        await this.registerFingerprint(userId, id);
+
         return {
           success: true,
           fingerprintData,
           fingerprintHash,
           templateId: id,
-          message: "Fingerprint enrolled successfully"
+          message: "Fingerprint enrolled successfully",
         };
-      } else if (enrollResponse.startsWith('ENROLL:ERROR:')) {
-        const errorMsg = enrollResponse.substring('ENROLL:ERROR:'.length);
-        throw new Error(errorMsg);
+      } else if (response.startsWith("ENROLL:ERROR:")) {
+        const errorCode = response.split(":")[2];
+        let message = "Failed to enroll fingerprint: ";
+        switch (errorCode) {
+          case "INVALID_ID":
+            message += "Template ID must be between 1 and 127";
+            break;
+          case "ERROR_IMAGING":
+            message += "Failed to capture fingerprint image. Clean sensor and try again.";
+            break;
+          case "ERROR_TEMPLATE":
+            message += "Failed to process first fingerprint image.";
+            break;
+          case "ERROR_TEMPLATE2":
+            message += "Second fingerprint scan didn't match the first. Ensure consistent placement.";
+            break;
+          case "ERROR_MODEL":
+            message += "Failed to create fingerprint model. Fingerprints may be too different.";
+            break;
+          case "ERROR_STORE":
+            message += "Failed to store fingerprint template.";
+            break;
+          default:
+            message += errorCode;
+        }
+        throw new Error(message);
+      } else if (response === "ENROLL:ERROR_MODEL") {
+        // Handle the specific ERROR_MODEL case that doesn't follow the standard format
+        throw new Error("Failed to enroll fingerprint: Failed to create fingerprint model. Fingerprints may be too different.");
       } else {
-        throw new Error("Unexpected enrollment response");
+        throw new Error(`Unknown enrollment error: ${response}`);
       }
     } catch (error) {
-      this.sensorStatus = "error";
-      this.lastError = error instanceof Error ? error.message : "Unknown error";
-      
+      console.error("Enrollment error:", error);
+      this.sensorMessage = `Enrollment error: ${(error as Error).message}`;
+      await storage.updateHardwareStatus({ 
+        fingerprintScannerConnected: this.sensorConnected 
+      });
       return {
         success: false,
-        message: `Failed to enroll fingerprint: ${this.lastError}`
+        message: this.sensorMessage,
       };
     }
   }
 
   /**
-   * Get the next available template ID
+   * Verify a fingerprint
    */
-  private async getNextAvailableId(): Promise<number> {
-    try {
-      const response = await this.sendCommand('GET_COUNT');
-      
-      if (response.startsWith('TEMPLATE_COUNT:')) {
-        const count = parseInt(response.substring('TEMPLATE_COUNT:'.length));
-        // Start from ID 1, or use the count + 1 if there are existing templates
-        return count + 1 > 0 ? count + 1 : 1;
-      } else if (response === 'TEMPLATE_COUNT:ERROR') {
-        return 1; // Default to 1 if count fails
-      } else {
-        return 1;
-      }
-    } catch (error) {
-      return 1; // Default to ID 1 if there's an error
-    }
-  }
-
-  /**
-   * Verify a fingerprint against stored templates
-   */
-  async verifyFingerprint(): Promise<{
+  async verifyFingerprint(voterId?: string): Promise<{
     success: boolean;
     verified: boolean;
     fingerprintData?: string;
@@ -505,211 +606,199 @@ class ArduinoController {
     message: string;
   }> {
     if (!this.connected) {
-      return { 
+      return {
         success: false,
         verified: false,
-        message: "Arduino is not connected" 
+        message: "Arduino is not connected",
       };
     }
 
+    if (this.enableSimulation || !this.useRealArduino) {
+      try {
+        if (!voterId) {
+          return {
+            success: true,
+            verified: true,
+            templateId: 1,
+            confidence: 95,
+            message: "SIMULATION MODE: Default fingerprint verified",
+          };
+        }
+
+        const user = await storage.getVoterByVoterId(voterId);
+        if (!user) {
+          return {
+            success: true,
+            verified: false,
+            message: `SIMULATION MODE: No user found with voter ID ${voterId}`,
+          };
+        }
+
+        if (user.fingerprintHash) {
+          const fingerprintId = await this.getFingerprintByUserId(user.id);
+          if (fingerprintId !== null) {
+            return {
+              success: true,
+              verified: true,
+              templateId: fingerprintId,
+              confidence: 95,
+              message: `SIMULATION MODE: Fingerprint verified for user ${user.id}`,
+            };
+          } else {
+            const newId = await this.getNextAvailableFingerprintId();
+            await this.registerFingerprint(user.id, newId);
+            return {
+              success: true,
+              verified: true,
+              templateId: newId,
+              confidence: 95,
+              message: `SIMULATION MODE: Registered and verified new fingerprint for user ${user.id}`,
+            };
+          }
+        } else {
+          return {
+            success: true,
+            verified: false,
+            message: `SIMULATION MODE: User ${user.id} has no fingerprint registered`,
+          };
+        }
+      } catch (error) {
+        return {
+          success: false,
+          verified: false,
+          message: `SIMULATION MODE: Error in verification: ${(error as Error).message}`,
+        };
+      }
+    }
+
     try {
-      this.sensorStatus = "busy";
-      
-      // Start verification process
-      const verifyResponse = await this.sendCommand('VERIFY', 60000);
-      
-      if (verifyResponse.startsWith('VERIFY:MATCH:')) {
-        const id = parseInt(verifyResponse.substring('VERIFY:MATCH:'.length));
-        
-        // Generate data for the matched fingerprint
+      const response = await this.sendCommand("VERIFY", 30000);
+
+      if (response.startsWith("VERIFY:MATCH:")) {
+        const id = parseInt(response.split(":")[2]);
         const fingerprintData = `fingerprint_template_${id}_verified`;
-        
-        this.sensorStatus = "ready";
-        this.lastActive = new Date();
-        
+
         return {
           success: true,
           verified: true,
           fingerprintData,
           templateId: id,
-          confidence: 95, // Default confidence for matches
-          message: "Fingerprint verified successfully"
+          confidence: 95,
+          message: "Fingerprint verified successfully",
         };
-      } else if (verifyResponse === 'VERIFY:NO_MATCH') {
-        this.sensorStatus = "ready";
-        this.lastActive = new Date();
-        
+      } else if (response === "VERIFY:NO_MATCH") {
         return {
           success: true,
           verified: false,
           confidence: 0,
-          message: "No matching fingerprint found"
+          message: "No matching fingerprint found",
         };
-      } else if (verifyResponse.startsWith('VERIFY:ERROR')) {
-        const errorMsg = verifyResponse.includes(':') 
-          ? verifyResponse.split(':')[2] 
-          : "Unknown verification error";
-        throw new Error(errorMsg);
+      } else if (response.startsWith("VERIFY:ERROR:")) {
+        const errorCode = response.split(":")[2];
+        let message = "Failed to verify fingerprint: ";
+        switch (errorCode) {
+          case "ERROR_IMAGING":
+            message += "Failed to capture fingerprint image. Clean sensor and try again.";
+            break;
+          case "ERROR_TEMPLATE":
+            message += "Failed to process fingerprint image.";
+            break;
+          default:
+            message += errorCode;
+        }
+        throw new Error(message);
       } else {
-        throw new Error("Unexpected verification response");
+        throw new Error(`Unexpected response: ${response}`);
       }
     } catch (error) {
-      this.sensorStatus = "error";
-      this.lastError = error instanceof Error ? error.message : "Unknown error";
-      
+      console.error("Verification error:", error);
+      this.sensorMessage = `Verification error: ${(error as Error).message}`;
+      await storage.updateHardwareStatus({ 
+        fingerprintScannerConnected: this.sensorConnected 
+      });
       return {
         success: false,
         verified: false,
-        message: `Failed to verify fingerprint: ${this.lastError}`
+        message: this.sensorMessage,
       };
     }
   }
 
   /**
-   * Delete a fingerprint template
+   * Delete a fingerprint
    */
-  async deleteFingerprint(templateId: number): Promise<{
-    success: boolean;
-    message: string;
-  }> {
+  async deleteFingerprint(templateId: number): Promise<{ success: boolean; message: string }> {
     if (!this.connected) {
-      return { 
-        success: false, 
-        message: "Arduino is not connected" 
-      };
+      return { success: false, message: "Arduino is not connected" };
     }
 
     try {
-      this.sensorStatus = "busy";
-      
       if (templateId <= 0 || templateId > 127) {
-        return {
-          success: false,
-          message: "Invalid template ID: must be between 1 and 127"
-        };
+        throw new Error("Invalid template ID: must be between 1 and 127");
       }
-      
-      const deleteResponse = await this.sendCommand(`DELETE:${templateId}`);
-      
-      if (deleteResponse.startsWith('DELETE:SUCCESS:')) {
-        this.sensorStatus = "ready";
-        this.lastActive = new Date();
-        
+
+      const response = await this.sendCommand(`DELETE:${templateId}`);
+
+      if (response.startsWith("DELETE:SUCCESS:")) {
         return {
           success: true,
-          message: `Fingerprint template ${templateId} deleted successfully`
+          message: `Fingerprint template ${templateId} deleted successfully`,
         };
-      } else if (deleteResponse === 'DELETE:ERROR') {
-        throw new Error("Failed to delete template");
+      } else if (response === "DELETE:ERROR") {
+        throw new Error("Failed to delete template: Template not found or error occurred");
       } else {
-        throw new Error("Unexpected delete response");
+        throw new Error(`Unexpected response: ${response}`);
       }
     } catch (error) {
-      this.sensorStatus = "error";
-      this.lastError = error instanceof Error ? error.message : "Unknown error";
-      
+      console.error("Delete error:", error);
+      this.sensorMessage = `Delete error: ${(error as Error).message}`;
+      await storage.updateHardwareStatus({ 
+        fingerprintScannerConnected: this.sensorConnected 
+      });
       return {
         success: false,
-        message: `Failed to delete fingerprint: ${this.lastError}`
+        message: this.sensorMessage,
       };
     }
   }
 
   /**
-   * Calibrate the fingerprint sensor
+   * Calibrate sensor
    */
-  async calibrateSensor(): Promise<{
-    success: boolean;
-    message: string;
-  }> {
+  async calibrateSensor(): Promise<{ success: boolean; message: string }> {
     if (!this.connected) {
-      return { 
-        success: false, 
-        message: "Arduino is not connected" 
-      };
+      return { success: false, message: "Arduino is not connected" };
     }
 
     try {
-      this.sensorStatus = "busy";
-      
-      // Check the sensor status as a form of calibration
-      const response = await this.sendCommand('CHECK_SENSOR');
-      
-      if (response.startsWith('SENSOR_STATUS:CONNECTED')) {
-        this.sensorStatus = "ready";
-        this.lastActive = new Date();
-        
+      const response = await this.sendCommand("CHECK_SENSOR");
+      if (response === "SENSOR_STATUS:CONNECTED") {
+        this.sensorConnected = true;
+        this.sensorMessage = "Sensor connected";
+        await storage.updateHardwareStatus({ 
+          fingerprintScannerConnected: true,
+          lastActiveFingerprint: new Date()
+        });
         return {
           success: true,
-          message: "Fingerprint sensor calibrated successfully"
+          message: "Fingerprint sensor calibrated successfully",
         };
       } else {
         throw new Error("Sensor not responding correctly to calibration");
       }
     } catch (error) {
-      this.sensorStatus = "error";
-      this.lastError = error instanceof Error ? error.message : "Unknown error";
-      
+      console.error("Calibration error:", error);
+      this.sensorConnected = false;
+      this.sensorMessage = `Calibration error: ${(error as Error).message}`;
+      await storage.updateHardwareStatus({ 
+        fingerprintScannerConnected: false 
+      });
       return {
         success: false,
-        message: `Failed to calibrate sensor: ${this.lastError}`
+        message: this.sensorMessage,
       };
-    }
-  }
-
-  /**
-   * Get the current status of the Arduino and fingerprint sensor
-   */
-  getStatus(): {
-    connected: boolean;
-    firmwareVersion: string;
-    sensorStatus: string;
-    lastError: string | null;
-    lastActive: Date | null;
-    port: string;
-    baudRate: number;
-    simulationMode: boolean;
-    enrolledTemplates: number;
-  } {
-    return {
-      connected: this.connected,
-      firmwareVersion: this.firmwareVersion,
-      sensorStatus: this.sensorStatus,
-      lastError: this.lastError,
-      lastActive: this.lastActive,
-      port: this.port,
-      baudRate: this.baudRate,
-      simulationMode: this.useSimulation,
-      enrolledTemplates: this.fingerprintTemplates.size
-    };
-  }
-
-  /**
-   * Modify the connection settings
-   */
-  updateSettings(settings: { port?: string; baudRate?: number; timeout?: number }): void {
-    const needsReconnect = 
-      (settings.port && settings.port !== this.port) || 
-      (settings.baudRate && settings.baudRate !== this.baudRate);
-    
-    if (settings.port) this.port = settings.port;
-    if (settings.baudRate) this.baudRate = settings.baudRate;
-    if (settings.timeout) this.timeout = settings.timeout;
-    
-    // If connected and settings changed, we should disconnect and reconnect
-    if (this.connected && needsReconnect) {
-      this.disconnect().then(() => {
-        this.connect();
-      }).catch(err => {
-        console.error("Error during reconnect:", err);
-      });
     }
   }
 }
 
-// Export a singleton instance
 export const arduinoController = new ArduinoController();
-
-// Add default settings for Windows users
-// Uncomment and modify the following line for Windows:
-// arduinoController.updateSettings({ port: "COM3" }); // Change COM3 to your Arduino port

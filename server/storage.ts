@@ -39,6 +39,12 @@ export interface IStorage {
     transactionHash?: string;
   }): Promise<Vote>;
 
+  // Fingerprint operations
+  getNextAvailableFingerprintId(): Promise<number>;
+  registerFingerprint(userId: number, fingerprintId: number): Promise<void>;
+  getFingerprintByUserId(userId: number): Promise<number | null>;
+  deleteFingerprint(fingerprintId: number): Promise<boolean>;
+
   // Hardware status operations
   getHardwareStatus(): Promise<HardwareStatus | undefined>;
   updateHardwareStatus(status: Partial<UpdateHardwareStatus>): Promise<HardwareStatus>;
@@ -54,6 +60,7 @@ export class MemStorage implements IStorage {
   private candidates: Map<number, Candidate>;
   private votes: Map<number, Vote>;
   private votesByVoterId: Map<string, Vote>;
+  private fingerprintIdMap: Map<number, number>; // Map userId to fingerprintId
   private hardwareStatus: HardwareStatus | undefined;
   private blockchainStatus: BlockchainStatus | undefined;
   
@@ -67,6 +74,7 @@ export class MemStorage implements IStorage {
     this.candidates = new Map();
     this.votes = new Map();
     this.votesByVoterId = new Map();
+    this.fingerprintIdMap = new Map();
     
     this.voterIdCounter = 1;
     this.candidateIdCounter = 1;
@@ -135,6 +143,12 @@ export class MemStorage implements IStorage {
         blockchainAddress: `0x${Math.random().toString(16).substring(2, 42)}`,
         hasVoted: Math.random() > 0.6, // About 40% of voters have voted
       });
+
+      // Register some sample fingerprints
+      if (Math.random() > 0.5) {
+        const fingerprintId = Math.floor(Math.random() * 120) + 1;
+        await this.registerFingerprint(i, fingerprintId);
+      }
     }
 
     // Add sample votes for voters who have voted
@@ -290,6 +304,38 @@ export class MemStorage implements IStorage {
     this.votes.set(id, newVote);
     this.votesByVoterId.set(vote.voterId, newVote);
     return newVote;
+  }
+
+  // Fingerprint Operations - Added to align with ArduinoController
+  async getNextAvailableFingerprintId(): Promise<number> {
+    // Find the highest fingerprint ID and add 1
+    let highestId = 0;
+    for (const fingerprintId of this.fingerprintIdMap.values()) {
+      if (fingerprintId > highestId) {
+        highestId = fingerprintId;
+      }
+    }
+    // Ensure the ID is within the valid range (1-127)
+    return Math.min(highestId + 1, 127) || 1;
+  }
+
+  async registerFingerprint(userId: number, fingerprintId: number): Promise<void> {
+    this.fingerprintIdMap.set(userId, fingerprintId);
+  }
+
+  async getFingerprintByUserId(userId: number): Promise<number | null> {
+    return this.fingerprintIdMap.get(userId) || null;
+  }
+
+  async deleteFingerprint(fingerprintId: number): Promise<boolean> {
+    // Find the user with this fingerprint ID and remove the mapping
+    for (const [userId, fpId] of this.fingerprintIdMap.entries()) {
+      if (fpId === fingerprintId) {
+        this.fingerprintIdMap.delete(userId);
+        return true;
+      }
+    }
+    return false;
   }
 
   // Hardware Status Operations

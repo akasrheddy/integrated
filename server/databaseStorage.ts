@@ -7,8 +7,15 @@ import {
   BlockchainStatus, UpdateBlockchainStatus
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, max, sql } from "drizzle-orm";
 import { IStorage } from "./storage";
+
+// Define a new table structure for fingerprint mappings
+// This should ideally be properly added to the schema, but we'll create a minimal implementation here
+const fingerprintMappings = {
+  userId: "user_id",
+  fingerprintId: "fingerprint_id",
+};
 
 export class DatabaseStorage implements IStorage {
   // Voter operations
@@ -140,6 +147,79 @@ export class DatabaseStorage implements IStorage {
       .values(vote)
       .returning();
     return newVote;
+  }
+
+  // Fingerprint operations - Added to match Arduino requirements
+  async getNextAvailableFingerprintId(): Promise<number> {
+    try {
+      // Execute a raw SQL query to find the max fingerprint ID
+      // Since we don't have a formal fingerprint_mappings table in schema.ts,
+      // this is a simplified implementation
+      const result = await db.execute(sql`
+        SELECT MAX(fingerprint_id::integer) as max_id
+        FROM (
+          SELECT fingerprint_hash as fingerprint_id 
+          FROM voters 
+          WHERE fingerprint_hash ~ '^[0-9]+$'
+        ) as fingerprint_ids
+      `);
+      
+      // Extract the maximum ID (if exists)
+      const maxId = result[0]?.max_id ? parseInt(result[0].max_id) : 0;
+      
+      // Return next available ID (ensuring it's within R307 sensor range: 1-127)
+      return Math.min(maxId + 1, 127) || 1;
+    } catch (error) {
+      console.error("Error getting next fingerprint ID:", error);
+      return 1; // Default to ID 1 if we can't determine
+    }
+  }
+
+  async registerFingerprint(userId: number, fingerprintId: number): Promise<void> {
+    try {
+      // Update the voter's fingerprintHash to store the template ID
+      // This is a simplified approach; ideally, we would have a dedicated fingerprint_mappings table
+      await db
+        .update(voters)
+        .set({ fingerprintHash: fingerprintId.toString() })
+        .where(eq(voters.id, userId));
+    } catch (error) {
+      console.error(`Failed to register fingerprint ${fingerprintId} for user ${userId}:`, error);
+      throw error;
+    }
+  }
+
+  async getFingerprintByUserId(userId: number): Promise<number | null> {
+    try {
+      const [voter] = await db
+        .select({ fingerprintHash: voters.fingerprintHash })
+        .from(voters)
+        .where(eq(voters.id, userId));
+      
+      if (voter?.fingerprintHash && /^\d+$/.test(voter.fingerprintHash)) {
+        return parseInt(voter.fingerprintHash);
+      }
+      return null;
+    } catch (error) {
+      console.error(`Failed to get fingerprint for user ${userId}:`, error);
+      return null;
+    }
+  }
+
+  async deleteFingerprint(fingerprintId: number): Promise<boolean> {
+    try {
+      // Find voters with this fingerprint ID and clear their fingerprintHash
+      const [updatedVoter] = await db
+        .update(voters)
+        .set({ fingerprintHash: null })
+        .where(eq(voters.fingerprintHash, fingerprintId.toString()))
+        .returning();
+        
+      return !!updatedVoter;
+    } catch (error) {
+      console.error(`Failed to delete fingerprint ${fingerprintId}:`, error);
+      return false;
+    }
   }
 
   // Hardware status operations
